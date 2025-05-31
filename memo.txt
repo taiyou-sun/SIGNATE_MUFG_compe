@@ -1,0 +1,65 @@
+df_3doutputed = pd.read_csv('output_3d.csv')
+df_3doutputed['prediction'] = df_3doutputed['prediction'].replace({2: 4})
+
+df_test = pd.read_csv('test.csv')
+df_test['timeToReply'] = df_test['timeToReply'].apply(parse_time_to_seconds)
+df_test['reviewCreatedVersion'].fillna(-1, inplace=True)
+
+# df_3doutputedの'prediction'が1の'id'を取得
+ids_to_keep = df_3doutputed[df_3doutputed['prediction'] == 1]['id']
+
+# df_testの中でこれらの'id'に該当する行だけを残す
+df_test = df_test[df_test['Unnamed: 0'].isin(ids_to_keep)]
+print(df_test)
+
+reviews = df_test.review.values
+reviews = ["[CLS] " + review + " [SEP] " for review in reviews]
+replies = df_test.replyContent.values
+replies = [reply + " [SEP]" for reply in replies]
+sentences = [reviews[i] + replies[i] for i in range(len(reviews))]
+features = df_test[['thumbsUpCount', 'reviewCreatedVersion', 'timeToReply']].values
+
+tokenizer = XLNetTokenizer.from_pretrained('xlnet-base-cased', do_lower_case=True)
+tokenized_texts = [tokenizer.tokenize(sent) for sent in sentences]
+
+# XLNetトークナイザーを使用して、トークンをXLNetボキャブラリのインデックス番号に変換
+input_ids = [tokenizer.convert_tokens_to_ids(x) for x in tokenized_texts]
+
+# 最大長に満たない場合は 0 で埋める
+input_ids = pad_sequences(input_ids, maxlen=MAX_LEN, dtype="long", truncating="post", padding="post")
+
+# attention masksの作成
+attention_masks = []
+
+for seq in input_ids:
+  seq_mask = [float(i>0) for i in seq]
+  attention_masks.append(seq_mask)
+
+test_ids = torch.tensor(input_ids).to(device)
+test_features = torch.tensor(features).float().to(device)
+test_masks = torch.tensor(attention_masks).to(device)
+
+predictions = []
+batch_size = 8
+i = 0
+while True:
+  gap = 0
+  if i >= len(test_ids):
+      break
+
+  prediction = model.predict(test_ids[i:i+batch_size], test_features[i:i+batch_size], test_masks[i:i+batch_size], None)
+  
+  if i == 0:
+    predictions = prediction
+  else:
+    predictions = np.concatenate([predictions, prediction])
+
+  i += batch_size
+
+predictions = np.array(predictions)
+
+print(predictions)
+
+df_3doutputed.loc[df_3doutputed['id'].isin(df_test['Unnamed: 0']), 'prediction'] = predictions + 1
+
+df_3doutputed.to_csv('output_3d_detailed.csv', index=False, header=False) 
